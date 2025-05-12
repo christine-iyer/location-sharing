@@ -3,13 +3,41 @@ import { GoogleMap, LoadScript, Marker } from "@react-google-maps/api";
 import Head from "next/head";
 import axios from "axios";
 
+interface Location {
+  lat: number;
+  lng: number;
+  address?: string;
+}
+
+interface DistanceResult {
+  distance: string;
+  duration: string;
+}
+
+interface GeocodingResponse {
+  status: string;
+  results: Array<{
+    formatted_address: string;
+    geometry: {
+      location: {
+        lat: number;
+        lng: number;
+      };
+    };
+  }>;
+}
+
 interface DistanceMatrixResponse {
   status: string;
   rows: Array<{
     elements: Array<{
-      distance?: {
-        value: number;
+      distance: {
         text: string;
+        value: number;
+      };
+      duration: {
+        text: string;
+        value: number;
       };
       status: string;
     }>;
@@ -17,44 +45,53 @@ interface DistanceMatrixResponse {
 }
 
 export default function Home() {
-  const [location, setLocation] = useState<GeolocationPosition | null>(null);
+  const [currentLocation, setCurrentLocation] = useState<Location | null>(null);
+  const [destination, setDestination] = useState<string>("");
+  const [distanceResult, setDistanceResult] = useState<DistanceResult | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [form, setForm] = useState({
-    from: "",
-    to: "",
-  });
-  const [distance, setDistance] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
-  const getLocation = () => {
+  const getCurrentLocation = () => {
     if (!navigator.geolocation) {
       setError("Geolocation is not supported by your browser");
       return;
     }
 
+    setLoading(true);
     navigator.geolocation.getCurrentPosition(
-      (position) => {
-        setLocation(position);
-        setError(null);
-        // Set the current location as the "from" address
-        setForm((prev) => ({
-          ...prev,
-          from: `${position.coords.latitude},${position.coords.longitude}`,
-        }));
+      async (position) => {
+        try {
+          const { latitude, longitude } = position.coords;
+          const response = await axios.get<GeocodingResponse>(`/api/distance?type=geocode&from=${latitude},${longitude}`);
+          
+          if (response.data.status === "OK" && response.data.results[0]) {
+            setCurrentLocation({
+              lat: latitude,
+              lng: longitude,
+              address: response.data.results[0].formatted_address
+            });
+            setError(null);
+          } else {
+            setError("Could not get address for your location");
+          }
+        } catch (error) {
+          setError("Error getting location details");
+          console.error(error);
+        } finally {
+          setLoading(false);
+        }
       },
       (error) => {
         setError("Unable to retrieve your location");
         console.error(error);
+        setLoading(false);
       }
     );
   };
 
   const calculateDistance = async () => {
-    const from = form.from.trim();
-    const to = form.to.trim();
-
-    if (!from || !to) {
-      setError("Please fill in both locations.");
+    if (!currentLocation || !destination) {
+      setError("Please provide both locations");
       return;
     }
 
@@ -62,37 +99,22 @@ export default function Home() {
     setError(null);
 
     try {
-      const apiKey = process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY;
-      if (!apiKey) {
-        throw new Error("Google Maps API key is not configured");
-      }
+      const response = await axios.get<DistanceMatrixResponse>(
+        `/api/distance?from=${currentLocation.lat},${currentLocation.lng}&to=${encodeURIComponent(destination)}`
+      );
 
-      const apiUrl = `https://maps.googleapis.com/maps/api/distancematrix/json?origins=${encodeURIComponent(
-        from
-      )}&destinations=${encodeURIComponent(to)}&key=${apiKey}`;
-
-      console.log("Making request to:", apiUrl);
-
-      const response = await axios.get(apiUrl);
-      const data = response.data as DistanceMatrixResponse;
-
-      console.log("API Response:", data);
-
-      if (data.status === "OK" && data.rows?.[0]?.elements?.[0]?.distance) {
-        const distanceInMeters = data.rows[0].elements[0].distance.value;
-        const distanceInMiles = (distanceInMeters * 0.000621371).toFixed(2);
-        setDistance(`${distanceInMiles} miles`);
+      if (response.data.status === "OK" && response.data.rows?.[0]?.elements?.[0]?.distance) {
+        const { distance, duration } = response.data.rows[0].elements[0];
+        setDistanceResult({
+          distance: distance.text,
+          duration: duration.text
+        });
       } else {
-        const errorMessage = data.error_message || "Unable to calculate distance. Please try again.";
-        setError(errorMessage);
+        setError("Could not calculate distance");
       }
     } catch (error) {
-      console.error("Error calculating distance:", error);
-      if (error instanceof Error) {
-        setError(`Error: ${error.message}`);
-      } else {
-        setError("An error occurred while calculating the distance.");
-      }
+      setError("Error calculating distance");
+      console.error(error);
     } finally {
       setLoading(false);
     }
@@ -103,15 +125,7 @@ export default function Home() {
     height: "400px",
   };
 
-  const center = location
-    ? {
-        lat: location.coords.latitude,
-        lng: location.coords.longitude,
-      }
-    : {
-        lat: 0,
-        lng: 0,
-      };
+  const center = currentLocation || { lat: 0, lng: 0 };
 
   return (
     <>
@@ -124,15 +138,16 @@ export default function Home() {
         <h1 className="mb-8 text-4xl font-bold">Location Sharing App</h1>
         
         <button
-          onClick={getLocation}
-          className="mb-8 rounded-lg bg-blue-500 px-6 py-3 text-white hover:bg-blue-600"
+          onClick={getCurrentLocation}
+          disabled={loading}
+          className="mb-8 rounded-lg bg-blue-500 px-6 py-3 text-white hover:bg-blue-600 disabled:bg-gray-400"
         >
-          Share My Location
+          {loading ? "Loading..." : "Share My Location"}
         </button>
 
         {error && <p className="mb-4 text-red-500">{error}</p>}
 
-        {location && (
+        {currentLocation && (
           <div className="w-full max-w-2xl">
             <LoadScript googleMapsApiKey={process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY ?? ""}>
               <GoogleMap
@@ -146,10 +161,7 @@ export default function Home() {
             
             <div className="mt-4 rounded-lg bg-gray-100 p-4">
               <p className="mb-2">
-                <strong>Latitude:</strong> {location.coords.latitude.toFixed(6)}
-              </p>
-              <p className="mb-4">
-                <strong>Longitude:</strong> {location.coords.longitude.toFixed(6)}
+                <strong>Current Location:</strong> {currentLocation.address}
               </p>
 
               <div className="mt-6">
@@ -157,17 +169,9 @@ export default function Home() {
                 <div className="space-y-4">
                   <input
                     type="text"
-                    placeholder="From (current location)"
-                    value={form.from}
-                    onChange={(e) => setForm((prev) => ({ ...prev, from: e.target.value }))}
-                    className="w-full rounded-lg border border-gray-300 p-2"
-                    readOnly
-                  />
-                  <input
-                    type="text"
-                    placeholder="To (destination)"
-                    value={form.to}
-                    onChange={(e) => setForm((prev) => ({ ...prev, to: e.target.value }))}
+                    placeholder="Enter destination address"
+                    value={destination}
+                    onChange={(e) => setDestination(e.target.value)}
                     className="w-full rounded-lg border border-gray-300 p-2"
                   />
                   <button
@@ -177,10 +181,15 @@ export default function Home() {
                   >
                     {loading ? "Calculating..." : "Calculate Distance"}
                   </button>
-                  {distance && (
-                    <p className="mt-4 text-center text-lg font-semibold text-green-600">
-                      Distance: {distance}
-                    </p>
+                  {distanceResult && (
+                    <div className="mt-4 text-center">
+                      <p className="text-lg font-semibold text-green-600">
+                        Distance: {distanceResult.distance}
+                      </p>
+                      <p className="text-lg font-semibold text-green-600">
+                        Duration: {distanceResult.duration}
+                      </p>
+                    </div>
                   )}
                 </div>
               </div>
